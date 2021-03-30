@@ -42,10 +42,9 @@ public class MainController {
         queryParams.add("captcha_output", captchaOutput);
         queryParams.add("pass_token", passToken);
         queryParams.add("gen_time", genTime);
-        queryParams.add("captcha_id", captchaId);
         queryParams.add("sign_token", signToken);
-
-        String url = domain + "/validate";
+        // captcha_id 参数建议放在 url 后面, 方便请求异常时可以在日志中根据id快速定位到异常请求
+        String url = String.format(domain + "/validate" + "?captcha_id=%s", captchaId);
         RestTemplate client = new RestTemplate();
         HttpHeaders headers = new HttpHeaders();
         HttpMethod method = HttpMethod.POST;
@@ -67,8 +66,10 @@ public class MainController {
         JSONObject res = new JSONObject();
         if (jsonObject.getString("result").equals("success")) {
             res.put("login", "success");
+            res.put("reason", jsonObject.getString("reason"));
         } else {
             res.put("login", "fail");
+            res.put("reason", jsonObject.getString("reason"));
         }
         return res.toString();
 
