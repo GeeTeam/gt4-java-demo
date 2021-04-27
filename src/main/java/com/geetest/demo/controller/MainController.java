@@ -26,10 +26,10 @@ public class MainController {
         String domain = "http://gcaptcha4.geetest.com";
 
         // 2.获取用户验证后前端传过来的验证流水号等参数
-        String lotNumber = getParams.get("lotNumber");
-        String captchaOutput = getParams.get("captchaOutput");
-        String passToken = getParams.get("passToken");
-        String genTime = getParams.get("genTime");
+        String lotNumber = getParams.get("lot_number");
+        String captchaOutput = getParams.get("captcha_output");
+        String passToken = getParams.get("pass_token");
+        String genTime = getParams.get("gen_time");
 
         // 3.生成签名
         // 生成签名使用标准的hmac算法，使用用户当前完成验证的流水号lot_number作为原始消息message，使用客户验证私钥作为key
