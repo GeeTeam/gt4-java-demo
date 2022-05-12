@@ -3,75 +3,96 @@ package com.geetest.demo.controller;
 import org.apache.commons.codec.digest.HmacAlgorithms;
 import org.apache.commons.codec.digest.HmacUtils;
 import org.json.JSONObject;
-import org.springframework.http.*;
-import org.springframework.util.LinkedMultiValueMap;
-import org.springframework.util.MultiValueMap;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
+import org.springframework.stereotype.Service;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.client.RestTemplate;
+import org.apache.commons.codec.binary.Base64;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.msgpack.core.MessageUnpacker;
+import org.msgpack.core.MessagePack;
 
+import javax.crypto.Cipher;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
+import java.security.spec.AlgorithmParameterSpec;
+import java.security.Security;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
+
 
 @RestController
+@Service
 public class MainController {
+    static {
+        Security.addProvider(new BouncyCastleProvider());
+    }
 
+    @Autowired
+    StringRedisTemplate stringRedisTemplate;
 
     @RequestMapping(value = "/login", method = {RequestMethod.GET})
     public String userLogin(@RequestParam Map<String, String> getParams) {
-        // 1.初始化极验参数信息
+
+        // 配置参数
         String captchaId = "647f5ed2ed8acb4be36784e01556bb71";
         String captchaKey = "b09a7aafbfd83f73b35a9b530d0337bf";
-        String domain = "http://gcaptcha4.geetest.com";
 
-        // 2.获取用户验证后前端传过来的验证流水号等参数
+        // 获取用户验证后前端传过来的验证流水号等参数
         String lotNumber = getParams.get("lot_number");
         String captchaOutput = getParams.get("captcha_output");
         String passToken = getParams.get("pass_token");
         String genTime = getParams.get("gen_time");
 
-        // 3.生成签名
-        // 生成签名使用标准的hmac算法，使用用户当前完成验证的流水号lot_number作为原始消息message，使用客户验证私钥作为key
-        // 采用sha256散列算法将message和key进行单向散列生成最终的签名
-        String signToken = new HmacUtils(HmacAlgorithms.HMAC_SHA_256, captchaKey).hmacHex(lotNumber);
-
-        // 4.上传校验参数到极验二次验证接口, 校验用户验证状态
-        MultiValueMap<String, String> queryParams = new LinkedMultiValueMap<>();
-        queryParams.add("lot_number", lotNumber);
-        queryParams.add("captcha_output", captchaOutput);
-        queryParams.add("pass_token", passToken);
-        queryParams.add("gen_time", genTime);
-        queryParams.add("sign_token", signToken);
-        // captcha_id 参数建议放在 url 后面, 方便请求异常时可以在日志中根据id快速定位到异常请求
-        String url = String.format(domain + "/validate" + "?captcha_id=%s", captchaId);
-        RestTemplate client = new RestTemplate();
-        HttpHeaders headers = new HttpHeaders();
-        HttpMethod method = HttpMethod.POST;
-        headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-        JSONObject jsonObject = new JSONObject();
-        //注意处理接口异常情况，当请求极验二次验证接口异常时做出相应异常处理
-        //保证不会因为接口请求超时或服务未响应而阻碍业务流程
-        try {
-            HttpEntity<MultiValueMap<String, String>> requestEntity = new HttpEntity<>(queryParams, headers);
-            ResponseEntity<String> response = client.exchange(url, method, requestEntity, String.class);
-            String resBody = response.getBody();
-            jsonObject = new JSONObject(resBody);
-        }catch (Exception e){
-            jsonObject.put("result","success");
-            jsonObject.put("reason","request geetest api fail");
-        }
-
-        // 5.根据极验返回的用户验证状态, 网站主进行自己的业务逻辑
+        // 二次校验流程
+        String msg = captchaOutput + lotNumber + genTime;
+        String tmpPassToken = new HmacUtils(HmacAlgorithms.HMAC_SHA_256, captchaKey).hmacHex(msg);
+        long t1 = Integer.parseInt(genTime);
+        long t2 = System.currentTimeMillis() / 1000;
+        int tmpTime = (int) (t2 - t1);
+        ValueOperations ops = stringRedisTemplate.opsForValue();
+        String cacheKey = "LOCAL_VALIDATE:" + lotNumber;
+        Object cacheData = ops.get(cacheKey);
         JSONObject res = new JSONObject();
-        if (jsonObject.getString("result").equals("success")) {
-            res.put("login", "success");
-            res.put("reason", jsonObject.getString("reason"));
+        if (!tmpPassToken.equals(passToken)) {
+            // 验证口令不合法
+            res.put("result", "fail");
+        } else if (tmpTime > 600) {
+            // 验证口令过期
+            res.put("result", "fail");
+        } else if (cacheData != null) {
+            // 验证口令重复使用
+            res.put("result", "fail");
         } else {
-            res.put("login", "fail");
-            res.put("reason", jsonObject.getString("reason"));
+            // 验证成功
+            res.put("result", "success");
+            ops.set(cacheKey, passToken, 600, TimeUnit.SECONDS);
         }
+
+        // 参数解析流程
+        try {
+            Cipher cipher = Cipher.getInstance("AES/CBC/PKCS7Padding");
+            String key = captchaKey.substring(0, 16);
+            String iv = captchaKey.substring(16, 32);
+            SecretKeySpec keySpec = new SecretKeySpec(key.getBytes(), "AES");
+            AlgorithmParameterSpec paramSpec = new IvParameterSpec(iv.getBytes());
+            cipher.init(Cipher.DECRYPT_MODE, keySpec, paramSpec);
+            MessageUnpacker unpacker = MessagePack.newDefaultUnpacker(cipher.doFinal(Base64.decodeBase64(captchaOutput)));
+            JSONObject captchaArgs = new JSONObject(unpacker.unpackValue().toJson());
+            unpacker.close();
+            // captchaArgs 为验证返回信息
+            // System.out.println(captchaArgs);
+            // String user_ip = res.getString("user_ip");
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
         return res.toString();
+
 
     }
 }
